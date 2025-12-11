@@ -323,6 +323,7 @@ Tracks packet journey times to detect delays and infer loss:
 
 **Important**: ZeroTier operates at layer 2 (Ethernet emulation) and does **not** automatically retransmit lost packets. This is by design:
 
+- **OSI Layer Separation**: In the OSI model, layer 2 (Data Link) provides frame delivery but not reliability. Reliability is the responsibility of layer 4 (Transport) protocols like TCP. ZeroTier emulates Ethernet (layer 2), so it focuses on delivery, not guaranteed reliability.
 - **Upper Layer Responsibility**: TCP, QUIC, and other protocols handle retransmission
 - **Avoid Double Retransmission**: If ZT retransmitted, TCP would also retransmit, wasting bandwidth
 - **Lower Latency**: No waiting for ZT-level retransmission timeouts
@@ -500,6 +501,8 @@ dqr Switch::dodequeue(ManagedQueue* q, uint64_t now) {
 The control law determines drop intervals:
 
 ```cpp
+// Simplified representation - actual implementation may use floating-point
+// arithmetic for more precise control
 uint64_t Switch::control_law(uint64_t t, int count) {
     return t + ZT_AQM_INTERVAL / sqrt(count);
 }
