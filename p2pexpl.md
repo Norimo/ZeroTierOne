@@ -34,22 +34,20 @@ ZeroTier preserves packet order through **flow hashing**. When multipath bonding
 
 A flow is identified by hashing the following packet characteristics:
 
-**For IPv4 packets:**
+**For both IPv4 and IPv6 packets:**
 ```cpp
 flowId = destinationPort ^ sourcePort ^ protocol
 ```
 
-**For IPv6 packets:**
-```cpp
-flowId = destinationPort ^ sourcePort ^ protocol
-```
+*Note: Both IPv4 and IPv6 currently use the same hashing algorithm for simplicity and consistency.*
 
 This hash computation occurs in `IncomingPacket.cpp` and `Switch.cpp`:
 
 ```cpp
+// Simplified representation - actual variable may use different naming
 if (peer->flowHashingSupported()) {
     // Extract protocol, source port, and destination port from packet
-    _flowId = dstPort ^ srcPort ^ proto;
+    flowId = dstPort ^ srcPort ^ proto;
 }
 ```
 
@@ -64,6 +62,7 @@ Once a flow ID is determined, the bonding policy ensures that all packets with t
 This is implemented in `Bond.cpp`:
 
 ```cpp
+// Simplified representation of the actual implementation
 SharedPtr<Path> Bond::getAppropriatePath(int64_t now, int32_t flowId)
 {
     if (flowId == -1) {
@@ -76,10 +75,12 @@ SharedPtr<Path> Bond::getAppropriatePath(int64_t now, int32_t flowId)
         // Create new flow and assign it to a path
         SharedPtr<Flow> flow = createFlow(ZT_MAX_PEER_NETWORK_PATHS, flowId, entropy, now);
         _flows[flowId] = flow;
+        // Return the path for the newly created flow
+        return _paths[flow->assignedPath].p;
     }
     
     // Return the path associated with this flow
-    return it->second->assignedPath();
+    return _paths[it->second->assignedPath].p;
 }
 ```
 
@@ -123,16 +124,20 @@ Within each connection, packets remain ordered because they all use the same pat
 
 Each flow maintains:
 - **Flow ID**: Unique identifier based on port/protocol hash
-- **Assigned Path**: The physical path this flow uses
+- **Assigned Path Index**: Index into the paths array for this flow
 - **Statistics**: Bytes in/out, packet counts, latency measurements
+- **Path Reassignment Tracking**: Anti-flapping mechanism
 
 ```cpp
+// Actual Flow structure from Bond.hpp
 struct Flow {
-    int32_t id;               // Flow identifier
-    SharedPtr<Path> path;     // Assigned path
-    uint64_t bytesIn;         // Bytes received
-    uint64_t bytesOut;        // Bytes sent
-    int64_t lastActivity;     // Last packet timestamp
+    int32_t id;                    // Flow ID used for hashing and path selection
+    uint64_t bytesIn;              // Used for tracking flow size
+    uint64_t bytesOut;             // Used for tracking flow size
+    int64_t lastActivity;          // Last time this flow handled traffic
+    int64_t lastPathReassignment;  // Time of last path assignment (anti-flapping)
+    int assignedPath;              // Index of path to which this flow is assigned
+    AtomicCounter __refCount;      // Reference counter for memory management
 };
 ```
 
@@ -298,8 +303,9 @@ Peers periodically send ACK messages containing:
 - Allows sender to detect loss by comparing sent vs. acknowledged
 
 ```cpp
-// ACK response format:
+// Simplified ACK response format:
 // <[4] 32-bit number of bytes received since last ACK>
+// Note: Actual format may include additional fields for throughput calculation
 ```
 
 #### 3. **QoS Measurement (VERB_QOS_MEASUREMENT)**
@@ -355,12 +361,12 @@ Fragments contain:
 - **Payload**: Portion of original packet
 
 ```cpp
-// Fragment format:
+// Fragment format (from Packet.hpp):
 // <[8] packet ID of packet whose fragment this belongs to>
 // <[5] destination ZT address>
-// <[1] 0xff, signals this is a fragment>
+// <[1] ZT_PACKET_FRAGMENT_INDICATOR (0xff), signals this is a fragment>
 // <[1] total fragments (MS 4 bits), fragment no (LS 4 bits)>
-// <[1] ZT hop count>
+// <[1] ZT hop count (top 5 bits unused and must be zero)>
 // <[...] fragment data>
 ```
 
@@ -495,7 +501,7 @@ The control law determines drop intervals:
 
 ```cpp
 uint64_t Switch::control_law(uint64_t t, int count) {
-    return t + INTERVAL / sqrt(count);
+    return t + ZT_AQM_INTERVAL / sqrt(count);
 }
 ```
 
@@ -514,15 +520,16 @@ ZeroTier implements FQ-CoDel (Fair Queuing CoDel):
 4. **Flow Isolation**: Heavy flow doesn't starve light flows
 
 ```cpp
+// Actual ManagedQueue structure from Switch.hpp
 struct ManagedQueue {
     int id;                   // Queue identifier (flowId)
     int byteCredit;           // Bytes this queue can send
     int byteLength;           // Current queue length in bytes
-    uint64_t first_above_time;
+    uint64_t first_above_time; // When sojourn time first exceeded target
     uint32_t count;           // CoDel drop count
-    uint64_t drop_next;
-    bool dropping;            // In dropping mode?
-    uint64_t drop_next_time;  // When to drop next
+    uint64_t drop_next;       // Time to drop next packet
+    bool dropping;            // Currently in dropping mode?
+    uint64_t drop_next_time;  // Scheduled next drop time
     std::list<TXQueueEntry*> q; // Actual packet queue
 };
 ```
